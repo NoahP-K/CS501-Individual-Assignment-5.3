@@ -116,18 +116,24 @@ fun MakeScreen(mic: AudioRecord?, bufferSize: Int = 0){
     LaunchedEffect(Unit) {
         val inArray = FloatArray(bufferSize)
         while(true) {
-            if(decibel < 0) {
+            if(mic.recordingState != AudioRecord.RECORDSTATE_RECORDING){
                 decibel = 0.0
+                delay(100)
                 mic.startRecording()
+                continue
             }
+//            if(decibel < 0) {
+//                decibel = 0.0
+//                mic.startRecording()
+//            }
             val read = mic.read(inArray, 0, bufferSize, READ_BLOCKING)
             if (read > 0) {
                 var sum = 0.0
                 for (i in 0 until bufferSize) {
                     sum += inArray[i] * inArray[i]
                 }
-                val rms = sqrt(sum/bufferSize)
-                decibel = 20 * log10(rms.coerceAtLeast(0.000000001)) + 80
+                val rms = sqrt(sum/bufferSize).coerceAtLeast(.000000001)
+                decibel = 20 * log10(rms) + 80
             } else {
                 decibel = 0.0
             }
@@ -149,14 +155,17 @@ fun MakeScreen(mic: AudioRecord?, bufferSize: Int = 0){
                 fontSize = 24.sp,
             )
 
-            if(decibel > 30){
+            //if(decibel > 30){
                 Text(
                     text = "Too loud! Try to keep it below 30 db.",
                     fontSize = 20.sp,
                     fontStyle = FontStyle.Italic,
-                    color = androidx.compose.ui.graphics.Color.Red
+                    color = if(decibel > 30)
+                        androidx.compose.ui.graphics.Color.Red
+                        else
+                        androidx.compose.ui.graphics.Color.Transparent
                 )
-            }
+            //}
 
             val color0 = if(decibel > 0)
                 Color(0xFF29C335)
