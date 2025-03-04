@@ -17,6 +17,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,6 +30,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -45,13 +47,11 @@ import androidx.compose.ui.unit.sp
 import androidx.core.app.ActivityCompat
 import com.example.individualassignment_53.ui.theme.IndividualAssignment_53Theme
 import kotlinx.coroutines.delay
+import java.nio.ShortBuffer
 import kotlin.math.log10
 import kotlin.math.sqrt
 
 class MainActivity : ComponentActivity(){
-
-    private var mic: AudioRecord? = null
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -61,88 +61,93 @@ class MainActivity : ComponentActivity(){
         //Loosely, I understand that I have added audio recording in the
         //manifest and also need to ask permission to use it. However,
         //I admit that I don't know specifically what everything here is doing.
-        if (ActivityCompat.checkSelfPermission(
-                this,
-                Manifest.permission.RECORD_AUDIO
-            ) != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this, arrayOf(Manifest.permission.RECORD_AUDIO), 200
-            )
-            return
-        }
-        val sampleRate = 44100
-        val channelConfig = AudioFormat.CHANNEL_IN_MONO
-        val format = AudioFormat.ENCODING_PCM_FLOAT
-        val bufferSize = AudioRecord.getMinBufferSize(   //input buffer size
-            44100,
-            channelConfig,
-            format
-        )
-        //val bufferSize = 1024
-        mic = AudioRecord(
-            MediaRecorder.AudioSource.MIC,  //audioSource
-            sampleRate,              //sample rate in Hz
-            channelConfig,    //audio channel config; guaranteed to work on all devices
-            format, //audio return format
-            bufferSize
-        )
-
-        setContent {
-            IndividualAssignment_53Theme {
-                mic?.startRecording()
-                MakeScreen(mic, bufferSize)
+        val requestPermissionLauncher =
+            registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted: Boolean ->
+                if (isGranted) {
+                    setContent {
+                        IndividualAssignment_53Theme {
+                            MakeScreen()
+                        }
+                    }
+                }
             }
+
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            setContent {
+                IndividualAssignment_53Theme {
+                    MakeScreen()
+                }
+            }
+        } else {
+            requestPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
-    }
-
-    override fun onResume() {
-        super.onResume()
-        mic?.startRecording()
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        mic?.release()
     }
 }
 
-@Composable
-fun MakeScreen(mic: AudioRecord?, bufferSize: Int = 0){
-    if(mic == null) return
-
-    var decibel by rememberSaveable { mutableStateOf(0.0) }
-
-    LaunchedEffect(Unit) {
-        val inArray = FloatArray(bufferSize)
-        while(true) {
-            if(mic.recordingState != AudioRecord.RECORDSTATE_RECORDING){
-                decibel = 0.0
-                delay(100)
-                mic.startRecording()
-                continue
+//a suspendable function to collect the audio data
+suspend fun getAudio(decibel: MutableState<Float>){
+    val sampleRate = 44100  //standard sampling rate
+    val channelConfig = AudioFormat.CHANNEL_IN_MONO //universally accepted audio-in channel
+    val format = AudioFormat.ENCODING_PCM_16BIT     //16 bit encoding format
+    val bufferSize = AudioRecord.getMinBufferSize(   //input buffer size, calculated to be the minimum needed for these settings
+        44100,
+        channelConfig,
+        format
+    )
+    var mic = AudioRecord(
+        MediaRecorder.AudioSource.MIC,
+        sampleRate,
+        channelConfig,
+        format,
+        bufferSize
+    )
+    mic.startRecording()
+    //an array to hold the input values
+    val inArray = ShortArray(bufferSize)
+    //continually check the audio input for new data
+    while(true) {
+        val read = mic.read(inArray, 0, bufferSize, READ_NON_BLOCKING)
+        //as long as something was read, process it
+        if (read > 0) {
+            var sum = 0.0
+            for (i in 0 until bufferSize) {
+                sum += inArray[i] * inArray[i]
             }
-//            if(decibel < 0) {
-//                decibel = 0.0
-//                mic.startRecording()
-//            }
-            val read = mic.read(inArray, 0, bufferSize, READ_BLOCKING)
-            if (read > 0) {
-                var sum = 0.0
-                for (i in 0 until bufferSize) {
-                    sum += inArray[i] * inArray[i]
-                }
-                val rms = sqrt(sum/bufferSize).coerceAtLeast(.000000001)
-                decibel = 20 * log10(rms) + 80
-            } else {
-                decibel = 0.0
-            }
-            delay(100)
+            val rms = sqrt(inArray.map {it.toDouble() * it.toDouble()}.sum() / read)
+            decibel.value = Math.max((20 * log10(rms.coerceAtLeast(0.0000001))).toFloat(), 0f)
+        /*
+        I had a big problem with the mic cutting off and not reading anymore. Not totally sure what
+        caused it but I believe this solved the problem. If nothing is read, I assume the mic has
+        dropped for whatever reason. I release the current mic and remake it with the same settings.
+         */
+        } else {
+            decibel.value = 0f
+            mic.release()
+            delay(500)
+            mic = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                sampleRate,
+                channelConfig,
+                format,
+                bufferSize
+            )
+            mic.startRecording()
         }
+        delay(100)
     }
-    Scaffold(
+}
 
-    ){innerPadding ->
+//function to make the main screen
+@Composable
+fun MakeScreen(){
+    //stores the decibel value of the input
+    val decibel = rememberSaveable { mutableStateOf(0f) }
+
+    //start checking for audio in coroutine
+    LaunchedEffect(Unit) {
+        getAudio(decibel)
+    }
+    Scaffold{innerPadding ->
         Column(
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -150,39 +155,42 @@ fun MakeScreen(mic: AudioRecord?, bufferSize: Int = 0){
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
+            val maxDec = 40 //the "too loud" volume.
             Text(
-                text = String.format("Decibel level: %.0fdb", decibel.toFloat()),
+                text = String.format("Decibel level: %.0fdb", decibel.value),
                 fontSize = 24.sp,
             )
+            //warning to keep the noise down. Is invisible when the noise is below the max threshold.
+            Text(
+                text = "Too loud! Try to keep it below $maxDec db.",
+                fontSize = 20.sp,
+                fontStyle = FontStyle.Italic,
+                color = if(decibel.value > maxDec)
+                    androidx.compose.ui.graphics.Color.Red
+                    else
+                    androidx.compose.ui.graphics.Color.Transparent
+            )
 
-            //if(decibel > 30){
-                Text(
-                    text = "Too loud! Try to keep it below 30 db.",
-                    fontSize = 20.sp,
-                    fontStyle = FontStyle.Italic,
-                    color = if(decibel > 30)
-                        androidx.compose.ui.graphics.Color.Red
-                        else
-                        androidx.compose.ui.graphics.Color.Transparent
-                )
-            //}
-
-            val color0 = if(decibel > 0)
+            //Show the color boxes are insivisble if the volume is below their threshold.
+            //As the volume rises, the boxes sequentially appear. It looks like a colored bar
+            //rising and falling with the sound.
+            val volumeIncrement = maxDec/5
+            val color0 = if(decibel.value > 0)
                 Color(0xFF29C335)
                 else androidx.compose.ui.graphics.Color.Transparent
-            val color1 = if(decibel > 6)
+            val color1 = if(decibel.value > volumeIncrement)
                 Color(0xFF97C329)
                 else androidx.compose.ui.graphics.Color.Transparent
-            val color2 = if(decibel > 12)
+            val color2 = if(decibel.value > volumeIncrement*2)
                 Color(0xFFB7C329)
                 else androidx.compose.ui.graphics.Color.Transparent
-            val color3 = if(decibel > 18)
+            val color3 = if(decibel.value > volumeIncrement*3)
                 Color(0xFFC3A529)
                 else androidx.compose.ui.graphics.Color.Transparent
-            val color4 = if(decibel > 24)
+            val color4 = if(decibel.value > volumeIncrement*4)
                 Color(0xFFE1A118)
                 else androidx.compose.ui.graphics.Color.Transparent
-            val color5 = if(decibel > 30)
+            val color5 = if(decibel.value > maxDec)
                 Color(0xFFFF0000)
                 else androidx.compose.ui.graphics.Color.Transparent
             Canvas(
